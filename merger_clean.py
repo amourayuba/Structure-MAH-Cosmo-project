@@ -9,20 +9,69 @@ import csv
 #############--------------- MxSy Simulations --------------#############################
 
 class Simulation:
-    '''A class of objects referring to a Dark Matter only simulation'''
+    """A class of objects referring to a Dark Matter only simulation"""
+
     def __init__(self, name, om0, sig8, path):
         self.name = name #name of the simulation
         self.om0 = om0 #Value of Omega_m for the simulation
         self.sig8 = sig8 #Value of sigma_8
         self.path = path #The base (absolute) path of that simulation. All simulation paths have to be structured the same.
     def get_redshifts(self):
-        '''Gets the list of redshifts of each snapshot'''
+        """Gets the list of redshifts of each snapshot"""
         if self.name[0] == 'M':
             return np.loadtxt(self.path + '/redshifts/M03S08.txt')
         elif os.path.exists(self.path + '/redshifts/{}.txt'.format(self.name)):
             return np.loadtxt(self.path + '/redshifts/{}.txt'.format(self.name))
         else:
             return np.loadtxt(self.path + '/redshifts/mxsy_reds.txt')[::-1]
+    def get_prefs(self):
+        """Gets the list of prefixes of each file for all available snapshots"""
+        with open(self.path + self.name + '/'+self.name+'_prefixes.txt') as file:
+            prefs = file.read().splitlines() #Names of each snapshot prefix.
+        return prefs
+
+    def get_mah(self):
+        """Gets the Mass Accretion History in the form of an .npy file with Nhalos elements, each one being a list of masses starting from z=0"""
+        return np.load(self.path + '/{}/mah_{}.npy'.format(self.name, self.name))
+
+    def get_mah_ids(self):
+        """Gets the associated halo ids of the Mass Accretion History in the form of an .npy file with Nhalos elements, each one being a list of masses starting from z=0"""
+        return np.load(self.path + '/{}/ids_{}.npy'.format(self.name, self.name))
+
+    def read_halos(self, snapshot=0):
+        """Read the halo file associated with this simulation and snapshot"""
+        prefs = self.get_prefs()
+        return pd.read_table(self.path + self.name + '/halos/' + prefs[snapshot] + '.AHF_halos', delim_whitespace=True, header=0)
+
+    def get_subfrac(self, snapshot=0):
+        """Gives the substructure fraction of all halos at  the given snapshot
+        :returns array (nhalo, 4) with (halo_idx, halo_mass, sub fraction, n subs)"""
+        prefs = self.get_prefs()
+        with open(self.path + self.name + '/substructure/' + prefs[snapshot] + '.AHF_substructure') as file:
+            lines = file.read().splitlines()
+        for i in range(len(lines)):
+            lines[i] = lines[i].split()
+        halo_nsubs = lines[::2]
+        subs_list = lines[1::2]
+
+        halos = self.read_halos(snapshot).set_index('#ID(1)')
+        nh = len(halo_nsubs)
+        subfrac = np.zeros((nh, 4))
+        for i in range(nh):
+            idx = int(halo_nsubs[i][0])
+            mhalo = halos.loc[idx]['Mhalo(4)']
+            subfrac[i, 0] = idx
+            subfrac[i, 1] = mhalo
+            msubs = 0
+            if int(halo_nsubs[i][1]) > 0:
+                for sub in subs_list[i]:
+                    try: #sometimes the halo hasn't been recorded in _halos file, these case are very rare
+                        msubs += halos.loc[int(sub)]['Mhalo(4)']
+                    except KeyError:
+                        msubs += 1e12 #this is the minimum halo mass
+            subfrac[i, 2] = msubs / mhalo
+            subfrac[i, 3] = int(int(halo_nsubs[i][1]))
+        return subfrac
 
     def get_desc_prog(self, snap, wpos=False):
         ''' Gets the descendant and progenitor masses if they are already saved'''
@@ -38,8 +87,8 @@ class Simulation:
         '''Makes a list of descendant masses and each corresponding prog mass'''
         f_halos = self.path + self.name +'/halos/'   #Typically where the halos are stored
         f_mtrees = self.path + self.name + '/mtrees/' #Typically where the merger trees are stored
-        with open(self.path + self.name + '/'+self.name+'_prefixes.txt') as file:
-            prefs = file.read().splitlines() #Names of each snapshot prefix.
+        prefs = self.get_prefs()
+
 
         d_halos = pd.read_table(f_halos + prefs[snapshot] + '.AHF_halos', delim_whitespace=True, header=0)
         p_halos = pd.read_table(f_halos + prefs[snapshot + 1] + '.AHF_halos', delim_whitespace=True, header=0)
@@ -103,6 +152,25 @@ class Simulation:
         if usepos:
             return np.array(mds, dtype=object), np.array(mprg, dtype=object), np.array(pos_prg, dtype=object)
         return np.array(mds, dtype=object), np.array(mprg, dtype=object)
+
+    def make_mah(self, save=False):
+        mahs, conc, ids, emptyfiles = [], [], [], []
+        filenames = os.listdir(self.path + self.name + '/mahs')
+        filenames.sort()
+        for file in filenames:
+            if os.path.getsize(self.path + self.name + '/mahs/' + file) > 15000: #check that file is has actual halos
+                mahs.append(np.loadtxt(self.path + self.name + '/mahs/' + file)[:, 4])
+                conc.append(np.loadtxt(self.path + self.name + '/mahs/' + file)[:, 43][0])
+                ids.append(np.loadtxt(self.path + self.name + '/mahs/' + file)[:, 1][0])
+            else:
+                print('file '+file+' is empty')
+                emptyfiles.append(file)
+        if save:
+            np.save(self.path + self.name + '/mahs_{}.npy'.format(self.name), np.array(mahs, dtype=object))
+            np.save(self.path + self.name +'/conc_{}.npy'.format(self.name), np.array(conc,  dtype=object))
+            np.save(self.path + self.name + '/ids_{}.npy'.format(self.name), np.array(ids, dtype=object))
+        return mahs, conc, ids, emptyfiles
+
 
     def get_mrat(self, pgmasses, wpos=False, m=None, pos_s=None):
         if wpos:
@@ -189,6 +257,3 @@ class Simulation:
                                     mres[:, k] += rat > dexis
 
         return mres, tnds
-
-
-   
